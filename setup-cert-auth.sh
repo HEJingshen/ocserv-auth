@@ -49,31 +49,37 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 error() { echo -e "${RED}[-]${NC} $1"; }
 
 # ============================================================
-# 前置条件：检查并安装依赖工具
+# 前置条件：检测包管理器并安装依赖工具
 # ============================================================
+
+# 统一检测包管理器
+PKG_MANAGER=""
+if command -v apt-get &>/dev/null; then
+    PKG_MANAGER="apt-get"
+elif command -v yum &>/dev/null; then
+    PKG_MANAGER="yum"
+else
+    error "未检测到 apt-get 或 yum 包管理器，请手动安装以下依赖后重新运行脚本："
+    error "  - fzf"
+    error "  - certtool (gnutls-bin / gnutls-utils)"
+    error "  - openssl"
+    exit 1
+fi
+info "检测到包管理器: $PKG_MANAGER"
+
 check_fzf() {
     if command -v fzf &>/dev/null; then
         info "fzf 已安装: $(fzf --version)"
         return
     fi
-    if command -v apt-get &>/dev/null; then
-        info "使用 apt-get 安装 fzf..."
-        apt-get update -qq && apt-get install -y -qq fzf
-    elif command -v yum &>/dev/null; then
-        info "使用 yum 安装 fzf..."
-        yum install -y fzf
-    elif command -v dnf &>/dev/null; then
-        info "使用 dnf 安装 fzf..."
-        dnf install -y fzf
-    elif command -v apk &>/dev/null; then
-        info "使用 apk 安装 fzf..."
-        apk add fzf
+    info "使用 $PKG_MANAGER 安装 fzf..."
+    if [[ "$PKG_MANAGER" == "apt-get" ]]; then
+        apt-get update -qq && apt-get install -y -qq fzf &>/dev/null
     else
-        error "无法自动安装 fzf，请先手动安装"
-        exit 1
+        yum install -y fzf &>/dev/null
     fi
     if ! command -v fzf &>/dev/null; then
-        error "fzf 安装失败"
+        error "fzf 安装失败，请手动安装后重新运行脚本"
         exit 1
     fi
     info "fzf 安装成功"
@@ -84,26 +90,15 @@ install_certtool() {
         info "certtool 已安装: $(certtool --version 2>&1 | head -1)"
         return
     fi
-
-    if command -v apt-get &>/dev/null; then
+    if [[ "$PKG_MANAGER" == "apt-get" ]]; then
         info "使用 apt-get 安装 gnutls-bin..."
-        apt-get update -qq && apt-get install -y -qq gnutls-bin
-    elif command -v yum &>/dev/null; then
-        info "使用 yum 安装 gnutls-utils..."
-        yum install -y gnutls-utils
-    elif command -v dnf &>/dev/null; then
-        info "使用 dnf 安装 gnutls-utils..."
-        dnf install -y gnutls-utils
-    elif command -v apk &>/dev/null; then
-        info "使用 apk 安装 gnutls..."
-        apk add gnutls
+        apt-get update -qq && apt-get install -y -qq gnutls-bin &>/dev/null
     else
-        error "无法自动安装 certtool，请手动安装 gnutls-bin 后重试"
-        exit 1
+        info "使用 yum 安装 gnutls-utils..."
+        yum install -y gnutls-utils &>/dev/null
     fi
-
     if ! command -v certtool &>/dev/null; then
-        error "certtool 安装失败"
+        error "certtool 安装失败，请手动安装后重新运行脚本"
         exit 1
     fi
     info "certtool 安装成功"
@@ -114,26 +109,15 @@ install_openssl() {
         info "openssl 已安装: $(openssl version)"
         return
     fi
-
-    if command -v apt-get &>/dev/null; then
+    if [[ "$PKG_MANAGER" == "apt-get" ]]; then
         info "使用 apt-get 安装 openssl..."
-        apt-get update -qq && apt-get install -y -qq openssl
-    elif command -v yum &>/dev/null; then
-        info "使用 yum 安装 openssl..."
-        yum install -y openssl
-    elif command -v dnf &>/dev/null; then
-        info "使用 dnf 安装 openssl..."
-        dnf install -y openssl
-    elif command -v apk &>/dev/null; then
-        info "使用 apk 安装 openssl..."
-        apk add openssl
+        apt-get update -qq && apt-get install -y -qq openssl &>/dev/null
     else
-        error "无法自动安装 openssl，请手动安装后重试"
-        exit 1
+        info "使用 yum 安装 openssl..."
+        yum install -y openssl &>/dev/null
     fi
-
     if ! command -v openssl &>/dev/null; then
-        error "openssl 安装失败"
+        error "openssl 安装失败，请手动安装后重新运行脚本"
         exit 1
     fi
     info "openssl 安装成功"
@@ -413,6 +397,18 @@ cert_signing_key
 crl_signing_key
 EOF
         info "新 CA 证书已生成: $CA_DIR/ca-cert.pem"
+
+        # 重新生成 CRL（旧 CRL 由已替换的 CA 密钥签名，无法继续使用）
+        if [[ -f "$CA_DIR/crl.pem" ]]; then
+            local crl_backup_suffix
+            crl_backup_suffix=$(date +%Y%m%d%H%M%S)
+            cp "$CA_DIR/crl.pem" "$CA_DIR/crl.pem.bak.$crl_backup_suffix" 2>/dev/null || true
+        fi
+        printf '3650\n\n' | certtool --generate-crl \
+            --load-ca-certificate "$CA_DIR/ca-cert.pem" \
+            --load-ca-privkey "$CA_DIR/ca-key.pem" \
+            --outfile "$CA_DIR/crl.pem" 2>/dev/null
+        info "CRL 已重新生成"
     else
         info "CA 证书有效，剩余 ${ca_status} 天"
         if [[ "$ca_status" -lt 90 ]]; then
@@ -704,6 +700,55 @@ do_cert_manage() {
 }
 
 # ============================================================
+# 选项 3：查看用户证书状态
+# ============================================================
+do_cert_status() {
+    info "=== 用户证书状态 ==="
+    echo ""
+    echo "  用户证书状态："
+    echo "  $(printf '%-16s %-12s %-24s' "用户" "状态" "有效期")"
+    echo "  ---------------------------------------------------------------"
+
+    local cert_valid=0 cert_expired=0 cert_new=0 cert_revoked=0 cert_error=0
+
+    for username in "${usernames[@]}"; do
+        local user_dir="$CERT_DIR/$username"
+        local cert_file="$user_dir/${username}-cert.pem"
+
+        if [[ -f "$cert_file" ]]; then
+            if is_cert_revoked "$cert_file"; then
+                printf "  %-16s %-12s %-24s\n" "$username" "已吊销" "证书已被吊销"
+                cert_revoked=$((cert_revoked + 1))
+            else
+                local days_left
+                days_left=$(check_cert_expiry_days "$cert_file")
+                if [[ "$days_left" == "error" ]]; then
+                    printf "  %-16s %-12s %-24s\n" "$username" "错误" "证书文件损坏"
+                    cert_error=$((cert_error + 1))
+                elif [[ "$days_left" -le 0 ]]; then
+                    local abs_days=${days_left#-}
+                    printf "  %-16s %-12s %-24s\n" "$username" "已过期" "${abs_days} 天前过期"
+                    cert_expired=$((cert_expired + 1))
+                else
+                    local end_date end_fmt
+                    end_date=$(openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | sed 's/notAfter=//')
+                    end_fmt=$(date -d "$end_date" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "未知")
+                    printf "  %-16s %-12s %-24s\n" "$username" "有效" "到期: $end_fmt ($days_left 天)"
+                    cert_valid=$((cert_valid + 1))
+                fi
+            fi
+        else
+            printf "  %-16s %-12s %-24s\n" "$username" "不存在" "需要生成"
+            cert_new=$((cert_new + 1))
+        fi
+    done
+
+    echo ""
+    echo "  汇总: 有效 $cert_valid, 已过期 $cert_expired, 不存在 $cert_new, 已吊销 $cert_revoked, 错误 $cert_error"
+    echo "=============================================="
+}
+
+# ============================================================
 # 选项 2：吊销证书
 # ============================================================
 do_cert_revoke() {
@@ -834,9 +879,10 @@ echo ""
 while true; do
     echo "  1) 证书新建 / 续期"
     echo "  2) 吊销用户证书"
+    echo "  3) 查看用户证书状态"
     echo "  0) 退出"
     echo ""
-    read -rp "  请选择操作 [0-2]: " menu_choice || continue
+    read -rp "  请选择操作 [0-3]: " menu_choice || continue
 
     case "$menu_choice" in
         1)
@@ -844,6 +890,9 @@ while true; do
             ;;
         2)
             do_cert_revoke
+            ;;
+        3)
+            do_cert_status
             ;;
         0)
             echo "  退出"
